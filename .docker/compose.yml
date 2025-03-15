@@ -1,0 +1,143 @@
+name: wave-cinema
+volumes:
+  wave_certificates: { }
+  wave_database: { }
+  wave_storage: { }
+  wave_vector_storage: { }
+
+services:
+
+  wave_openssl:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: openssl/
+    container_name: certificates
+    restart: unless-stopped
+    environment:
+      DNS_NAME: ${HOST_DOMAIN}
+      IP_ADDR: ${HOST_IP}
+    volumes:
+      - wave_certificates:/certs/
+
+  wave_cockroachdb:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: cockroachdb/
+      args:
+        COCKROACHDB_VERSION: ${COCKROACHDB_VERSION}
+    container_name: database
+    restart: unless-stopped
+    environment:
+      COCKROACHDB_DATABASE: ${COCKROACHDB_DATABASE}
+      COCKROACHDB_USER: ${COCKROACHDB_USER}
+    volumes:
+      - wave_database:/cockroach/cockroach-data/
+    ports:
+      - "${COCKROACHDB_PORT}:26257"
+      - "${COCKROACHDB_UI_PORT}:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://127.0.0.1:8080/health?ready=1" ]
+      interval: 27s
+      timeout: 1s
+      retries: 9
+
+  wave_dragonflydb:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: dragonflydb/
+      args:
+        DRAGONFLYDB_VERSION: ${DRAGONFLYDB_VERSION}
+    container_name: storage
+    restart: unless-stopped
+    volumes:
+      - wave_storage:/data/
+    ports:
+      - "${DRAGONFLYDB_PORT}:6379"
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "127.0.0.1", "6379" ]
+      interval: 27s
+      timeout: 1s
+      retries: 9
+
+  wave_weaviatedb:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: weaviatedb/
+      args:
+        WEAVIATE_DB_VERSION: ${WEAVIATE_DB_VERSION}
+    container_name: vector-storage
+    restart: unless-stopped
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      STANDALONE: "true"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      ENABLE_API_BASED_MODULES: "true"
+      ENABLE_MODULES: "text2vec-ollama,generative-ollama"
+      CLUSTER_HOSTNAME: "node1"
+    volumes:
+      - wave_vector_storage:/var/lib/weaviate/
+    ports:
+      - "${WEAVIATE_DB_PORT}:8080"
+      - "${WEAVIATE_DB_GRPC_PORT}:50051"
+
+  wave_golang:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: golang/
+      args:
+        GOLANG_VERSION: ${GOLANG_VERSION}
+    container_name: backend
+    restart: unless-stopped
+    environment:
+      COCKROACHDB_DATABASE: ${COCKROACHDB_DATABASE}
+      COCKROACHDB_USER: ${COCKROACHDB_USER}
+
+      GOLANG_ENV: ${ENV}
+      GOLANG_PORT: ${GOLANG_PORT}
+      NODE_PORT: ${NODE_PORT}
+
+      HOST_DOMAIN: ${HOST_DOMAIN}
+      HOST_IP: ${HOST_IP}
+    volumes:
+      - wave_certificates:/certs/
+      - ../backend/:/usr/src/app/
+    ports:
+      - "${GOLANG_PORT}:${GOLANG_PORT}"
+    depends_on:
+      wave_cockroachdb:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "127.0.0.1", "80" ]
+      interval: 27s
+      timeout: 1s
+      retries: 9
+
+  wave_nodejs:
+    env_file: .env
+    build:
+      dockerfile: Dockerfile
+      context: nodejs/
+      args:
+        NODE_VERSION: ${NODE_VERSION}
+    container_name: frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${ENV}
+      NODE_PORT: ${NODE_PORT}
+      GOLANG_PORT: ${GOLANG_PORT}
+
+      HOST_DOMAIN: ${HOST_DOMAIN}
+      HOST_IP: ${HOST_IP}
+    volumes:
+      - wave_certificates:/certs/
+      - ../frontend/:/home/node/app/
+    ports:
+      - "${NODE_PORT}:${NODE_PORT}"
+    depends_on:
+      - wave_golang
